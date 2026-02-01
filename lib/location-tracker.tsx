@@ -141,9 +141,12 @@ async function shouldTrackLocation(): Promise<{ canTrack: boolean; reason: Track
     status = await fetchAndSaveTodayStatus(userUid);
   }
 
+  // OFFLINE MODE: If still no status, assume user can track
+  // This allows location recording to continue when offline
+  // The background task will save locations locally, and they'll sync later
   if (!status) {
-    // No status available (not authenticated or no data)
-    return { canTrack: false, reason: 'not_authenticated' };
+    console.log('No checkin status available (offline), allowing tracking to continue');
+    return { canTrack: true, reason: 'active' };
   }
 
   if (!status.check_in) {
@@ -231,6 +234,9 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
   const [error, setError] = useState<string | null>(null);
   const [statusReason, setStatusReason] = useState<TrackingStatusReason>('stopped');
 
+  // Track if we've already attempted to start tracking this session
+  const hasAttemptedStart = React.useRef(false);
+
   // Check if background tracking is already running
   const checkTrackingStatus = useCallback(async () => {
     const hasStarted = await Location.hasStartedLocationUpdatesAsync(
@@ -243,6 +249,8 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
     if (storedReason) {
       setStatusReason(storedReason as TrackingStatusReason);
     }
+
+    return hasStarted;
   }, []);
 
   // Refresh checkin status and update tracking state
@@ -390,17 +398,47 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
   }, [checkTrackingStatus]);
 
   // Auto-start tracking when authenticated (only for SATPAM)
+  // This effect only runs once per session to avoid repeated starts on reload
   useEffect(() => {
-    if (isAuthenticated && user?.uid && !isTracking) {
+    const initTracking = async () => {
+      // Skip if we've already attempted to start this session
+      if (hasAttemptedStart.current) {
+        return;
+      }
+
+      if (!isAuthenticated || !user?.uid) {
+        return;
+      }
+
+      // Check if tracking is already running in background
+      const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(
+        BACKGROUND_LOCATION_TASK
+      ).catch(() => false);
+
+      if (alreadyRunning) {
+        console.log('Background tracking already running, skipping start');
+        setIsTracking(true);
+        // Refresh the status reason
+        const { reason } = await shouldTrackLocation();
+        setStatusReason(reason);
+        return;
+      }
+
+      // Mark that we've attempted to start
+      hasAttemptedStart.current = true;
+
       // Only start tracking for SATPAM users
       if (user?.level === 'SATPAM') {
+        console.log('Starting tracking for SATPAM user');
         startTracking();
       } else {
         setStatusReason('not_satpam');
         SecureStore.setItemAsync('tracking_status_reason', 'not_satpam');
       }
-    }
-  }, [isAuthenticated, user?.uid, user?.level, isTracking, startTracking]);
+    };
+
+    initTracking();
+  }, [isAuthenticated, user?.uid, user?.level, startTracking]);
 
   // Stop tracking when user logs out
   useEffect(() => {
@@ -408,6 +446,8 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
       stopTracking();
       SecureStore.deleteItemAsync('user_uid');
       SecureStore.deleteItemAsync('tracking_status_reason');
+      // Reset the start attempt flag so tracking can start again on next login
+      hasAttemptedStart.current = false;
     }
   }, [isAuthenticated, stopTracking]);
 
