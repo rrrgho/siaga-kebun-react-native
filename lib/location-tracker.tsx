@@ -98,7 +98,7 @@ interface LocationTrackerContextType {
 const LocationTrackerContext = createContext<LocationTrackerContextType | undefined>(undefined);
 
 const TRACKING_INTERVAL = 900000; // 15 Mins
-// const TRACKING_INTERVAL = 30000; // 15 Mins
+// const TRACKING_INTERVAL = 60000; // 30 secs
 
 // Helper function to fetch today's checkin status from API and save to local storage
 async function fetchAndSaveTodayStatus(
@@ -195,25 +195,24 @@ TaskManager.defineTask(
         // Initialize database with sync API for background compatibility
         openDatabaseSync();
 
-        // Save each location to database using sync function
-        for (const location of locations) {
-          try {
-            insertLocationRecordSync({
-              user_uid: userUid,
-              latitude: location.coords.latitude,
-              longitude: location.coords.longitude,
-              recorded_at: new Date(location.timestamp).toISOString(),
-              synced: false,
-            });
+        // Save only the latest location (not all accumulated locations)
+        const latestLocation = locations[locations.length - 1];
+        try {
+          insertLocationRecordSync({
+            user_uid: userUid,
+            latitude: latestLocation.coords.latitude,
+            longitude: latestLocation.coords.longitude,
+            recorded_at: new Date(latestLocation.timestamp).toISOString(),
+            synced: false,
+          });
 
-            console.log('Background location recorded:', {
-              lat: location.coords.latitude,
-              lng: location.coords.longitude,
-              time: new Date(location.timestamp).toISOString(),
-            });
-          } catch (insertErr) {
-            console.error('Error inserting location record:', insertErr);
-          }
+          console.log('Background location recorded:', {
+            lat: latestLocation.coords.latitude,
+            lng: latestLocation.coords.longitude,
+            time: new Date(latestLocation.timestamp).toISOString(),
+          });
+        } catch (insertErr) {
+          console.error('Error inserting location record:', insertErr);
         }
 
         // Update status reason to active
@@ -336,8 +335,7 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
       await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
         accuracy: Location.Accuracy.High,
         timeInterval: TRACKING_INTERVAL,
-        distanceInterval: 0, // Track based on time, not distance
-        deferredUpdatesInterval: TRACKING_INTERVAL,
+        distanceInterval: 0, // Track based on time only
         showsBackgroundLocationIndicator: true,
         foregroundService: {
           notificationTitle: 'Siaga Kebun',

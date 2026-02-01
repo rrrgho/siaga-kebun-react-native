@@ -17,6 +17,11 @@ import {
   getAllDangerousAreas,
   getUnsyncedDangerousAreas,
   markDangerousAreaAsSynced,
+  MapImage,
+  saveMapImagesFromServer,
+  getAllMapImages,
+  getDownloadedMapImages,
+  updateMapImageLocalPath,
 } from './database';
 
 interface CheckinPayload {
@@ -526,6 +531,97 @@ export function usePanicButton() {
     mutationFn: async (payload: PanicButtonPayload) => {
       const response = await apiClient.post<PanicButtonResponse>('/panic-buttons', payload);
       return response.data;
+    },
+  });
+}
+
+// ==========================================
+// Map Images API
+// ==========================================
+
+interface MapImageAPIResponse {
+  id: number;
+  name: string;
+  description: string | null;
+  image_url: string;
+  image_path: string;
+  bounding_box: [[string, string], [string, string]];
+  bottom_left_latitude: string;
+  bottom_left_longitude: string;
+  top_right_latitude: string;
+  top_right_longitude: string;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MapImagesResponse {
+  success: boolean;
+  data: MapImageAPIResponse[];
+  count: number;
+}
+
+// Fetch active map images from API and save to local database
+export function useActiveMapImages() {
+  const queryClient = useQueryClient();
+
+  return useQuery({
+    queryKey: ['activeMapImages'],
+    queryFn: async () => {
+      try {
+        const response = await apiClient.get<MapImagesResponse>('/map-images/active');
+        const mapImages = response.data.data;
+
+        // Transform and save to local database
+        const transformedMaps = mapImages.map((map) => ({
+          id: map.id,
+          name: map.name,
+          description: map.description,
+          image_url: map.image_url,
+          image_path: map.image_path,
+          bottom_left_latitude: map.bottom_left_latitude,
+          bottom_left_longitude: map.bottom_left_longitude,
+          top_right_latitude: map.top_right_latitude,
+          top_right_longitude: map.top_right_longitude,
+          display_order: map.display_order,
+          created_at: map.created_at,
+          updated_at: map.updated_at,
+        }));
+
+        saveMapImagesFromServer(transformedMaps);
+
+        // Return all maps from local database (includes download status)
+        return getAllMapImages();
+      } catch (error) {
+        // If offline, try to get from local database
+        const localMaps = getAllMapImages();
+        if (localMaps.length > 0) {
+          console.log('Using local map images (offline mode)');
+          return localMaps;
+        }
+        throw error;
+      }
+    },
+    staleTime: 1000 * 60 * 5, // 5 minutes
+  });
+}
+
+// Get locally stored map images (for offline use)
+export function useLocalMapImages() {
+  return useQuery({
+    queryKey: ['localMapImages'],
+    queryFn: async () => {
+      return getAllMapImages();
+    },
+  });
+}
+
+// Get downloaded map images only
+export function useDownloadedMapImages() {
+  return useQuery({
+    queryKey: ['downloadedMapImages'],
+    queryFn: async () => {
+      return getDownloadedMapImages();
     },
   });
 }

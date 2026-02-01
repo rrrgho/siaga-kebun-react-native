@@ -13,18 +13,13 @@
       "resizeMode": "contain",
       "backgroundColor": "#7bed9a"
     },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "This app needs access to your location to track security officer movements.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs access to your location to track security officer movements even when the app is in the background.",
-        "UIBackgroundModes": [
-          "location",
-          "fetch"
-        ]
+        "UIBackgroundModes": ["location", "fetch"]
       },
       "bundleIdentifier": "com.siagakebun.mobile"
     },
@@ -41,7 +36,12 @@
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION"
       ],
-      "package": "com.siagakebun.mobile"
+      "package": "com.siagakebun.mobile",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDKCiM597jZhMO0jcEBYFDmy5JMax01OjQ"
+        }
+      }
     },
     "web": {
       "bundler": "metro",

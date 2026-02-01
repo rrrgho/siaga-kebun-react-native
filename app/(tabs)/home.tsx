@@ -418,7 +418,7 @@ export default function HomeScreen() {
 
       <FlatList
         data={isSatpam ? locationRecords : []}
-        keyExtractor={(item) => item.id?.toString() ?? item.recorded_at}
+        keyExtractor={(item, index) => `${item.id ?? 'no-id'}-${item.recorded_at}-${index}`}
         renderItem={renderLocationItem}
         contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
         refreshControl={

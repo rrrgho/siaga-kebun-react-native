@@ -696,3 +696,226 @@ export function clearAllDangerousAreas(): void {
   const database = openDatabaseSync();
   database.runSync(`DELETE FROM dangerous_areas`);
 }
+
+// ==========================================
+// Map Images types and functions
+// ==========================================
+
+export interface MapImage {
+  id: number;
+  name: string;
+  description: string | null;
+  image_url: string;
+  image_path: string;
+  local_image_path: string | null;
+  bottom_left_latitude: string;
+  bottom_left_longitude: string;
+  top_right_latitude: string;
+  top_right_longitude: string;
+  display_order: number;
+  downloaded: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// Initialize map images table
+export function initMapImagesTable(): void {
+  const database = openDatabaseSync();
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS map_images (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      image_url TEXT NOT NULL,
+      image_path TEXT NOT NULL,
+      local_image_path TEXT,
+      bottom_left_latitude TEXT NOT NULL,
+      bottom_left_longitude TEXT NOT NULL,
+      top_right_latitude TEXT NOT NULL,
+      top_right_longitude TEXT NOT NULL,
+      display_order INTEGER DEFAULT 0,
+      downloaded INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+// Save or update a map image record
+export function saveMapImage(mapImage: Omit<MapImage, 'downloaded' | 'local_image_path'>): void {
+  const database = openDatabaseSync();
+  initMapImagesTable();
+
+  // Check if map already exists
+  const existing = database.getFirstSync<{
+    id: number;
+    local_image_path: string | null;
+    downloaded: number;
+  }>(`SELECT id, local_image_path, downloaded FROM map_images WHERE id = ?`, [mapImage.id]);
+
+  if (existing) {
+    // Update existing record, preserve local_image_path and downloaded status
+    database.runSync(
+      `UPDATE map_images SET 
+        name = ?, description = ?, image_url = ?, image_path = ?,
+        bottom_left_latitude = ?, bottom_left_longitude = ?,
+        top_right_latitude = ?, top_right_longitude = ?,
+        display_order = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        mapImage.name,
+        mapImage.description,
+        mapImage.image_url,
+        mapImage.image_path,
+        mapImage.bottom_left_latitude,
+        mapImage.bottom_left_longitude,
+        mapImage.top_right_latitude,
+        mapImage.top_right_longitude,
+        mapImage.display_order,
+        mapImage.updated_at,
+        mapImage.id,
+      ]
+    );
+  } else {
+    // Insert new record
+    database.runSync(
+      `INSERT INTO map_images 
+       (id, name, description, image_url, image_path, local_image_path,
+        bottom_left_latitude, bottom_left_longitude, top_right_latitude, top_right_longitude,
+        display_order, downloaded, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        mapImage.id,
+        mapImage.name,
+        mapImage.description,
+        mapImage.image_url,
+        mapImage.image_path,
+        mapImage.bottom_left_latitude,
+        mapImage.bottom_left_longitude,
+        mapImage.top_right_latitude,
+        mapImage.top_right_longitude,
+        mapImage.display_order,
+        mapImage.created_at,
+        mapImage.updated_at,
+      ]
+    );
+  }
+}
+
+// Save multiple map images from server
+export function saveMapImagesFromServer(
+  mapImages: Array<Omit<MapImage, 'downloaded' | 'local_image_path'>>
+): void {
+  for (const mapImage of mapImages) {
+    saveMapImage(mapImage);
+  }
+}
+
+// Update local image path and mark as downloaded
+export function updateMapImageLocalPath(mapId: number, localPath: string): void {
+  const database = openDatabaseSync();
+  database.runSync(`UPDATE map_images SET local_image_path = ?, downloaded = 1 WHERE id = ?`, [
+    localPath,
+    mapId,
+  ]);
+}
+
+// Get all map images
+export function getAllMapImages(): MapImage[] {
+  const database = openDatabaseSync();
+  initMapImagesTable();
+
+  const records = database.getAllSync<{
+    id: number;
+    name: string;
+    description: string | null;
+    image_url: string;
+    image_path: string;
+    local_image_path: string | null;
+    bottom_left_latitude: string;
+    bottom_left_longitude: string;
+    top_right_latitude: string;
+    top_right_longitude: string;
+    display_order: number;
+    downloaded: number;
+    created_at: string;
+    updated_at: string;
+  }>(`SELECT * FROM map_images ORDER BY display_order ASC, name ASC`);
+
+  return records.map((record) => ({
+    ...record,
+    downloaded: record.downloaded === 1,
+  }));
+}
+
+// Get downloaded map images only
+export function getDownloadedMapImages(): MapImage[] {
+  const database = openDatabaseSync();
+  initMapImagesTable();
+
+  const records = database.getAllSync<{
+    id: number;
+    name: string;
+    description: string | null;
+    image_url: string;
+    image_path: string;
+    local_image_path: string | null;
+    bottom_left_latitude: string;
+    bottom_left_longitude: string;
+    top_right_latitude: string;
+    top_right_longitude: string;
+    display_order: number;
+    downloaded: number;
+    created_at: string;
+    updated_at: string;
+  }>(`SELECT * FROM map_images WHERE downloaded = 1 ORDER BY display_order ASC, name ASC`);
+
+  return records.map((record) => ({
+    ...record,
+    downloaded: true,
+  }));
+}
+
+// Get a single map image by ID
+export function getMapImageById(mapId: number): MapImage | null {
+  const database = openDatabaseSync();
+  initMapImagesTable();
+
+  const record = database.getFirstSync<{
+    id: number;
+    name: string;
+    description: string | null;
+    image_url: string;
+    image_path: string;
+    local_image_path: string | null;
+    bottom_left_latitude: string;
+    bottom_left_longitude: string;
+    top_right_latitude: string;
+    top_right_longitude: string;
+    display_order: number;
+    downloaded: number;
+    created_at: string;
+    updated_at: string;
+  }>(`SELECT * FROM map_images WHERE id = ?`, [mapId]);
+
+  if (!record) return null;
+
+  return {
+    ...record,
+    downloaded: record.downloaded === 1,
+  };
+}
+
+// Delete a map image and its local file reference
+export function deleteMapImage(mapId: number): void {
+  const database = openDatabaseSync();
+  database.runSync(`DELETE FROM map_images WHERE id = ?`, [mapId]);
+}
+
+// Mark map as not downloaded (when file is deleted)
+export function markMapAsNotDownloaded(mapId: number): void {
+  const database = openDatabaseSync();
+  database.runSync(`UPDATE map_images SET local_image_path = NULL, downloaded = 0 WHERE id = ?`, [
+    mapId,
+  ]);
+}

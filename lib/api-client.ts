@@ -1,10 +1,10 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import * as SecureStore from 'expo-secure-store';
 
-const API_BASE_URL = 'https://siaga-kebun.doiscode.com/api';
+const API_BASE_URL = 'https://siagakebun.com/api';
 
 // Base URL without /api for WebView links
-export const WEB_BASE_URL = 'https://siaga-kebun.doiscode.com';
+export const WEB_BASE_URL = 'https://siagakebun.com';
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
