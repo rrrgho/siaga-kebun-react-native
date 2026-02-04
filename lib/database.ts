@@ -217,6 +217,20 @@ export async function clearAllRecords(): Promise<void> {
   database.runSync(`DELETE FROM location_records`);
 }
 
+// Delete all synced records to optimize storage
+export function deleteSyncedRecordsSync(userUid: string): number {
+  const database = openDatabaseSync();
+  const result = database.runSync(
+    `DELETE FROM location_records WHERE user_uid = ? AND synced = 1`,
+    [userUid]
+  );
+  return result.changes;
+}
+
+export async function deleteSyncedRecords(userUid: string): Promise<number> {
+  return deleteSyncedRecordsSync(userUid);
+}
+
 // Work Allocation functions
 
 // Get today's date as string (YYYY-MM-DD)

@@ -1,5 +1,6 @@
 import { Icon } from '@/components/ui/icon';
 import { Text } from '@/components/ui/text';
+import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { Tabs } from 'expo-router';
 import { AlertTriangleIcon, HomeIcon, MapIcon } from 'lucide-react-native';
@@ -9,6 +10,9 @@ import { View } from 'react-native';
 const PRIMARY_COLOR = '#7bed9a';
 
 export default function TabsLayout() {
+  const { user } = useAuth();
+  const isSatpam = user?.level === 'SATPAM';
+
   return (
     <Tabs
       screenOptions={{
@@ -44,6 +48,7 @@ export default function TabsLayout() {
         name="map"
         options={{
           title: 'Map',
+          href: isSatpam ? null : undefined, // Hide tab for SATPAM users
           tabBarIcon: ({ color, focused }) => (
             <View
               className={cn('rounded-full p-2', focused ? 'bg-[#7bed9a]/20' : 'bg-transparent')}>

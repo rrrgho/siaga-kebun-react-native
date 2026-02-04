@@ -98,7 +98,7 @@ interface LocationTrackerContextType {
 const LocationTrackerContext = createContext<LocationTrackerContextType | undefined>(undefined);
 
 // const TRACKING_INTERVAL = 900000; // 15 Mins
-const TRACKING_INTERVAL = 60000; // 30 secs
+const TRACKING_INTERVAL = 300000; // 5 Mins
 
 // Helper function to fetch today's checkin status from API and save to local storage
 async function fetchAndSaveTodayStatus(

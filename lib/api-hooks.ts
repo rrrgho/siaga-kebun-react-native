@@ -4,6 +4,7 @@ import { apiClient } from './api-client';
 import {
   getUnsyncedLocationRecords,
   markRecordsAsSynced,
+  deleteSyncedRecords,
   LocationRecord,
   saveWorkAllocations,
   getWorkAllocations,
@@ -159,36 +160,83 @@ export function useCheckout() {
   });
 }
 
+// Minimum interval between synced records (20 minutes in milliseconds)
+const MIN_SYNC_INTERVAL_MS = 20 * 60 * 1000;
+
+// Filter records to only include those with at least MIN_SYNC_INTERVAL_MS difference
+function filterRecordsByInterval(records: LocationRecord[]): LocationRecord[] {
+  if (records.length === 0) return [];
+
+  // Records should already be sorted by recorded_at ASC from database
+  const filteredRecords: LocationRecord[] = [];
+  let lastSyncedTime: Date | null = null;
+
+  for (const record of records) {
+    const recordTime = new Date(record.recorded_at);
+
+    if (lastSyncedTime === null) {
+      // Always include the first record
+      filteredRecords.push(record);
+      lastSyncedTime = recordTime;
+    } else {
+      const timeDiff = recordTime.getTime() - lastSyncedTime.getTime();
+
+      if (timeDiff >= MIN_SYNC_INTERVAL_MS) {
+        // Include this record as it's at least 20 minutes after the last synced one
+        filteredRecords.push(record);
+        lastSyncedTime = recordTime;
+      }
+      // Skip records that are less than 20 minutes apart (but still mark as synced later)
+    }
+  }
+
+  return filteredRecords;
+}
+
 // Sync location records mutation
 export function useSyncLocations() {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (userUid: string) => {
-      // Get all unsynced records
+      // Get all unsynced records (sorted by recorded_at ASC)
       const unsyncedRecords = await getUnsyncedLocationRecords(userUid);
 
       if (unsyncedRecords.length === 0) {
-        return { synced: 0, message: 'No records to sync' };
+        return { synced: 0, sent: 0, message: 'No records to sync' };
       }
 
-      // Prepare payload
-      const payload: TrackingPayload[] = unsyncedRecords.map((record) => ({
-        latitude: record.latitude,
-        longitude: record.longitude,
-        recorded_at: record.recorded_at,
-      }));
+      // Filter records to only send those with at least 20 minutes interval
+      const recordsToSend = filterRecordsByInterval(unsyncedRecords);
 
-      // Send to API
-      await apiClient.post('/tracking', payload);
+      // Only send to API if there are records to send
+      if (recordsToSend.length > 0) {
+        // Prepare payload with only filtered records
+        const payload: TrackingPayload[] = recordsToSend.map((record) => ({
+          latitude: record.latitude,
+          longitude: record.longitude,
+          recorded_at: record.recorded_at,
+        }));
 
-      // Mark records as synced
-      const ids = unsyncedRecords.map((r) => r.id).filter((id): id is number => id !== undefined);
-      await markRecordsAsSynced(ids);
+        // Send to API
+        await apiClient.post('/tracking', payload);
+      }
+
+      // Mark ALL unsynced records as synced (including skipped ones)
+      // This prevents re-sending skipped records in future syncs
+      const allIds = unsyncedRecords
+        .map((r) => r.id)
+        .filter((id): id is number => id !== undefined);
+      await markRecordsAsSynced(allIds);
+
+      // Delete all synced records to optimize mobile storage
+      const deletedCount = await deleteSyncedRecords(userUid);
 
       return {
         synced: unsyncedRecords.length,
-        message: `Synced ${unsyncedRecords.length} records`,
+        sent: recordsToSend.length,
+        deleted: deletedCount,
+        message: `Processed ${unsyncedRecords.length} records, sent ${recordsToSend.length} to server, deleted ${deletedCount} from storage`,
       };
     },
     onSuccess: () => {
