@@ -1,8 +1,9 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import * as SecureStore from 'expo-secure-store';
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { Platform } from 'react-native';
+import NetInfo from '@react-native-community/netinfo';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import { Platform, AppState, AppStateStatus } from 'react-native';
 import { useAuth } from './auth-context';
 import {
   openDatabaseSync,
@@ -10,6 +11,11 @@ import {
   insertLocationRecord,
   getCheckinStatusSync,
   saveCheckinStatusSync,
+  getUnsyncedCountSync,
+  getUnsyncedLocationRecordsSync,
+  markRecordsAsSyncedSync,
+  deleteSyncedRecordsSync,
+  incrementSyncedCountSync,
 } from './database';
 import { apiClient } from './api-client';
 
@@ -90,15 +96,21 @@ interface LocationTrackerContextType {
   lastLocation: Location.LocationObject | null;
   error: string | null;
   statusReason: TrackingStatusReason;
+  lastSyncTime: Date | null;
+  isSyncing: boolean;
   startTracking: () => Promise<void>;
   stopTracking: () => Promise<void>;
   refreshCheckinStatus: () => Promise<void>;
+  refreshLastSyncTime: () => Promise<void>;
+  syncNow: () => Promise<{ synced: number; sent: number; deleted: number } | null>;
 }
 
 const LocationTrackerContext = createContext<LocationTrackerContextType | undefined>(undefined);
 
 // const TRACKING_INTERVAL = 900000; // 15 Mins
 const TRACKING_INTERVAL = 300000; // 5 Mins
+const AUTO_SYNC_INTERVAL = 300000; // 5 Mins - Auto sync interval
+const MIN_SYNC_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes - minimum interval between synced records
 
 // Helper function to fetch today's checkin status from API and save to local storage
 async function fetchAndSaveTodayStatus(
@@ -158,6 +170,151 @@ async function shouldTrackLocation(): Promise<{ canTrack: boolean; reason: Track
   }
 
   return { canTrack: true, reason: 'active' };
+}
+
+// Get last synced record time from storage (sync version for background task)
+function getLastSyncedRecordTimeSync(): Date | null {
+  try {
+    // Use a simple in-memory cache since SecureStore is async
+    // This will be updated after each sync
+    return lastSyncedRecordTimeCache;
+  } catch {
+    return null;
+  }
+}
+
+// In-memory cache for last synced record time
+let lastSyncedRecordTimeCache: Date | null = null;
+
+// Initialize cache from SecureStore (called at startup)
+async function initLastSyncedRecordTime(): Promise<void> {
+  try {
+    const stored = await SecureStore.getItemAsync('last_synced_record_time');
+    if (stored) {
+      lastSyncedRecordTimeCache = new Date(stored);
+    }
+  } catch (err) {
+    console.error('Error loading last synced record time:', err);
+  }
+}
+
+// Update last synced record time
+async function setLastSyncedRecordTime(time: Date): Promise<void> {
+  lastSyncedRecordTimeCache = time;
+  await SecureStore.setItemAsync('last_synced_record_time', time.toISOString());
+}
+
+// Filter records to only include those with at least MIN_SYNC_INTERVAL_MS difference
+// from the last successfully synced record
+function filterRecordsByIntervalSync(
+  records: { id?: number; latitude: number; longitude: number; recorded_at: string }[]
+): { records: typeof records; lastTime: Date | null } {
+  if (records.length === 0) return { records: [], lastTime: null };
+
+  const filteredRecords: typeof records = [];
+  // Start from the last synced record time, or null if no previous sync
+  let lastSyncedTime: Date | null = getLastSyncedRecordTimeSync();
+
+  for (const record of records) {
+    const recordTime = new Date(record.recorded_at);
+
+    if (lastSyncedTime === null) {
+      // No previous sync, send this record
+      filteredRecords.push(record);
+      lastSyncedTime = recordTime;
+    } else {
+      const timeDiff = recordTime.getTime() - lastSyncedTime.getTime();
+      if (timeDiff >= MIN_SYNC_INTERVAL_MS) {
+        filteredRecords.push(record);
+        lastSyncedTime = recordTime;
+      }
+    }
+  }
+
+  return { records: filteredRecords, lastTime: lastSyncedTime };
+}
+
+// Sync function that can run in background
+async function syncLocationsToServer(
+  userUid: string
+): Promise<{ synced: number; sent: number; deleted: number }> {
+  const unsyncedRecords = getUnsyncedLocationRecordsSync(userUid);
+
+  if (unsyncedRecords.length === 0) {
+    return { synced: 0, sent: 0, deleted: 0 };
+  }
+
+  // Filter records to only send those with at least 20 minutes interval
+  // from the last successfully synced record
+  const { records: recordsToSend, lastTime } = filterRecordsByIntervalSync(unsyncedRecords);
+
+  // Only send to API if there are records to send
+  if (recordsToSend.length > 0) {
+    const payload = recordsToSend.map((record) => ({
+      latitude: record.latitude,
+      longitude: record.longitude,
+      recorded_at: record.recorded_at,
+    }));
+
+    await apiClient.post('/tracking', payload);
+
+    // Update last synced record time after successful API call
+    if (lastTime) {
+      await setLastSyncedRecordTime(lastTime);
+    }
+
+    // Increment total synced count (for UI display)
+    incrementSyncedCountSync(userUid, recordsToSend.length);
+  }
+
+  // Mark ALL unsynced records as synced
+  const allIds = unsyncedRecords.map((r) => r.id).filter((id): id is number => id !== undefined);
+  markRecordsAsSyncedSync(allIds);
+
+  // Delete all synced records to optimize storage
+  const deletedCount = deleteSyncedRecordsSync(userUid);
+
+  console.log(
+    `Sync complete: processed ${unsyncedRecords.length}, sent ${recordsToSend.length}, deleted ${deletedCount}`
+  );
+
+  return {
+    synced: unsyncedRecords.length,
+    sent: recordsToSend.length,
+    deleted: deletedCount,
+  };
+}
+
+// Background sync function - runs in background task
+async function performBackgroundSync(userUid: string): Promise<void> {
+  try {
+    // Check internet connection
+    const netState = await NetInfo.fetch();
+    if (!netState.isConnected) {
+      console.log('Background sync: No internet connection, skipping');
+      return;
+    }
+
+    // Check if there are records to sync
+    const unsyncedCount = getUnsyncedCountSync(userUid);
+    if (unsyncedCount === 0) {
+      console.log('Background sync: No unsynced records');
+      return;
+    }
+
+    // Initialize last synced record time cache before syncing
+    await initLastSyncedRecordTime();
+
+    console.log(`Background sync: Starting sync of ${unsyncedCount} records...`);
+    const result = await syncLocationsToServer(userUid);
+
+    // Store last sync time
+    await SecureStore.setItemAsync('last_sync_time', new Date().toISOString());
+    console.log(`Background sync complete: sent ${result.sent}, deleted ${result.deleted}`);
+  } catch (err) {
+    console.error('Background sync error:', err);
+    // Don't throw - background sync should be silent
+  }
 }
 
 // Define the background task outside of React component
@@ -220,6 +377,10 @@ TaskManager.defineTask(
 
         // Update status reason to active
         await SecureStore.setItemAsync('tracking_status_reason', 'active');
+
+        // Perform background sync after saving location
+        // This runs every time location is recorded (every 5 minutes)
+        await performBackgroundSync(userUid);
       } catch (err) {
         console.error('Error saving background location:', err);
       }
@@ -233,9 +394,13 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
   const [lastLocation, setLastLocation] = useState<Location.LocationObject | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusReason, setStatusReason] = useState<TrackingStatusReason>('stopped');
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Track if we've already attempted to start tracking this session
-  const hasAttemptedStart = React.useRef(false);
+  const hasAttemptedStart = useRef(false);
+  const autoSyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   // Check if background tracking is already running
   const checkTrackingStatus = useCallback(async () => {
@@ -250,8 +415,147 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
       setStatusReason(storedReason as TrackingStatusReason);
     }
 
+    // Load last sync time from storage
+    const storedSyncTime = await SecureStore.getItemAsync('last_sync_time');
+    if (storedSyncTime) {
+      setLastSyncTime(new Date(storedSyncTime));
+    }
+
+    // Initialize last synced record time cache for 20-minute filtering
+    await initLastSyncedRecordTime();
+
     return hasStarted;
   }, []);
+
+  // Refresh last sync time from storage (for when background sync updates it)
+  const refreshLastSyncTime = useCallback(async () => {
+    const storedSyncTime = await SecureStore.getItemAsync('last_sync_time');
+    if (storedSyncTime) {
+      setLastSyncTime(new Date(storedSyncTime));
+    }
+  }, []);
+
+  // Manual sync function exposed to UI
+  const syncNow = useCallback(async (): Promise<{
+    synced: number;
+    sent: number;
+    deleted: number;
+  } | null> => {
+    if (!user?.uid || isSyncing) return null;
+
+    try {
+      setIsSyncing(true);
+
+      // Check internet connection
+      const netState = await NetInfo.fetch();
+      if (!netState.isConnected) {
+        console.log('No internet connection, skipping sync');
+        return null;
+      }
+
+      const result = await syncLocationsToServer(user.uid);
+      const syncTime = new Date();
+      setLastSyncTime(syncTime);
+      await SecureStore.setItemAsync('last_sync_time', syncTime.toISOString());
+      return result;
+    } catch (err) {
+      console.error('Error syncing locations:', err);
+      throw err;
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [user?.uid, isSyncing]);
+
+  // Auto-sync function (silent, no errors thrown) - for foreground sync
+  const performAutoSync = useCallback(async () => {
+    if (!user?.uid || isSyncing) return;
+
+    try {
+      // Check internet connection
+      const netState = await NetInfo.fetch();
+      if (!netState.isConnected) {
+        console.log('Auto-sync: No internet connection, skipping');
+        return;
+      }
+
+      // Check if there are records to sync
+      const unsyncedCount = getUnsyncedCountSync(user.uid);
+      if (unsyncedCount === 0) {
+        console.log('Auto-sync: No unsynced records');
+        return;
+      }
+
+      console.log(`Auto-sync: Starting sync of ${unsyncedCount} records...`);
+      setIsSyncing(true);
+
+      const result = await syncLocationsToServer(user.uid);
+      const syncTime = new Date();
+      setLastSyncTime(syncTime);
+      await SecureStore.setItemAsync('last_sync_time', syncTime.toISOString());
+      console.log(`Auto-sync complete: sent ${result.sent}, deleted ${result.deleted}`);
+    } catch (err) {
+      console.error('Auto-sync error:', err);
+      // Don't throw - auto-sync should be silent
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [user?.uid, isSyncing]);
+
+  // Set up auto-sync interval
+  useEffect(() => {
+    if (!isAuthenticated || !user?.uid) {
+      // Clear interval if not authenticated
+      if (autoSyncIntervalRef.current) {
+        clearInterval(autoSyncIntervalRef.current);
+        autoSyncIntervalRef.current = null;
+      }
+      return;
+    }
+
+    // Only for SATPAM users
+    if (user?.level !== 'SATPAM') {
+      return;
+    }
+
+    // Perform initial sync after a short delay
+    const initialSyncTimeout = setTimeout(() => {
+      performAutoSync();
+    }, 10000); // 10 seconds after mount
+
+    // Set up interval for auto-sync every 5 minutes
+    autoSyncIntervalRef.current = setInterval(() => {
+      performAutoSync();
+    }, AUTO_SYNC_INTERVAL);
+
+    return () => {
+      clearTimeout(initialSyncTimeout);
+      if (autoSyncIntervalRef.current) {
+        clearInterval(autoSyncIntervalRef.current);
+        autoSyncIntervalRef.current = null;
+      }
+    };
+  }, [isAuthenticated, user?.uid, user?.level, performAutoSync]);
+
+  // Handle app state changes - sync when app comes to foreground
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active' &&
+        user?.level === 'SATPAM'
+      ) {
+        console.log('App came to foreground, refreshing sync status and triggering auto-sync');
+        // Refresh last sync time from storage (may have been updated by background sync)
+        refreshLastSyncTime();
+        performAutoSync();
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [performAutoSync, refreshLastSyncTime, user?.level]);
 
   // Refresh checkin status and update tracking state
   const refreshCheckinStatus = useCallback(async () => {
@@ -458,9 +762,13 @@ export function LocationTrackerProvider({ children }: { children: React.ReactNod
         lastLocation,
         error,
         statusReason,
+        lastSyncTime,
+        isSyncing,
         startTracking,
         stopTracking,
         refreshCheckinStatus,
+        refreshLastSyncTime,
+        syncNow,
       }}>
       {children}
     </LocationTrackerContext.Provider>

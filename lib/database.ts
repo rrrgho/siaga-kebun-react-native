@@ -84,6 +84,16 @@ export function openDatabaseSync(): SQLite.SQLiteDatabase {
         UNIQUE(user_uid, status_date)
       );
     `);
+
+    // Create sync stats table to track total synced count
+    db.execSync(`
+      CREATE TABLE IF NOT EXISTS sync_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_uid TEXT NOT NULL UNIQUE,
+        total_synced INTEGER DEFAULT 0,
+        last_sync_time TEXT
+      );
+    `);
   }
   return db;
 }
@@ -201,6 +211,37 @@ export function getUnsyncedCountSync(userUid: string): number {
 
 export async function getUnsyncedCount(userUid: string): Promise<number> {
   return getUnsyncedCountSync(userUid);
+}
+
+export function getSyncedCountSync(userUid: string): number {
+  const database = openDatabaseSync();
+  const result = database.getFirstSync<{ total_synced: number }>(
+    `SELECT total_synced FROM sync_stats WHERE user_uid = ?`,
+    [userUid]
+  );
+  return result?.total_synced ?? 0;
+}
+
+export async function getSyncedCount(userUid: string): Promise<number> {
+  return getSyncedCountSync(userUid);
+}
+
+// Increment total synced count after successful sync
+export function incrementSyncedCountSync(userUid: string, count: number): void {
+  const database = openDatabaseSync();
+  // Use INSERT OR REPLACE to handle both new and existing records
+  database.runSync(
+    `INSERT INTO sync_stats (user_uid, total_synced, last_sync_time)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(user_uid) DO UPDATE SET
+       total_synced = total_synced + excluded.total_synced,
+       last_sync_time = excluded.last_sync_time`,
+    [userUid, count]
+  );
+}
+
+export async function incrementSyncedCount(userUid: string, count: number): Promise<void> {
+  incrementSyncedCountSync(userUid, count);
 }
 
 export async function getLocationRecordsCount(userUid: string): Promise<number> {

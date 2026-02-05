@@ -6,13 +6,12 @@ import {
   useCheckout,
   usePanicButton,
   useSatpamUsers,
-  useSyncLocations,
   useTodayStatus,
   useTodayWorkAllocations,
 } from '@/lib/api-hooks';
 import { WEB_BASE_URL } from '@/lib/api-client';
 import { useAuth } from '@/lib/auth-context';
-import { getUnsyncedCount, WorkAllocation } from '@/lib/database';
+import { getUnsyncedCount, getSyncedCount, WorkAllocation } from '@/lib/database';
 import { getTrackingStatusMessage, useLocationTracker } from '@/lib/location-tracker';
 import { cn } from '@/lib/utils';
 import * as WebBrowser from 'expo-web-browser';
@@ -28,6 +27,7 @@ import {
   LogInIcon,
   LogOutIcon,
   MapPinIcon,
+  RefreshCwIcon,
   ShieldIcon,
   UserIcon,
   UsersIcon,
@@ -37,6 +37,8 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  AppState,
+  AppStateStatus,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -60,13 +62,16 @@ export default function HomeScreen() {
     lastLocation,
     error: trackingError,
     statusReason,
+    lastSyncTime,
+    isSyncing,
     refreshCheckinStatus,
+    refreshLastSyncTime,
+    syncNow,
   } = useLocationTracker();
 
   // Mutation hooks
   const checkinMutation = useCheckin();
   const checkoutMutation = useCheckout();
-  const syncMutation = useSyncLocations();
   const panicButtonMutation = usePanicButton();
 
   // State hooks - ALL useState must be together
@@ -74,6 +79,7 @@ export default function HomeScreen() {
   const [cooldownRemaining, setCooldownRemaining] = React.useState<number>(0);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
   const [unsyncedCount, setUnsyncedCount] = React.useState(0);
+  const [syncedCount, setSyncedCount] = React.useState(0);
 
   // Ref hooks
   const bounceAnim = React.useRef(new Animated.Value(1)).current;
@@ -150,28 +156,65 @@ export default function HomeScreen() {
     return () => clearInterval(interval);
   }, [lastEmergencyTime]);
 
-  // Load unsynced count
-  const loadUnsyncedCount = React.useCallback(async () => {
+  // Load unsynced and synced counts
+  const loadLocationCounts = React.useCallback(async () => {
     if (!user?.uid || !isSatpam) return;
     try {
-      const count = await getUnsyncedCount(user.uid);
-      setUnsyncedCount(count);
+      const [unsynced, synced] = await Promise.all([
+        getUnsyncedCount(user.uid),
+        getSyncedCount(user.uid),
+      ]);
+      setUnsyncedCount(unsynced);
+      setSyncedCount(synced);
     } catch (error) {
-      console.error('Error loading unsynced count:', error);
+      console.error('Error loading location counts:', error);
     }
   }, [user?.uid, isSatpam]);
 
   // Initial load
   React.useEffect(() => {
-    loadUnsyncedCount();
-  }, [loadUnsyncedCount]);
+    loadLocationCounts();
+  }, [loadLocationCounts]);
 
-  // Refresh data when sync completes
+  // Refresh counts when lastSyncTime changes (auto-sync completed)
   React.useEffect(() => {
-    if (syncMutation.isSuccess) {
-      loadUnsyncedCount();
+    if (lastSyncTime) {
+      loadLocationCounts();
     }
-  }, [syncMutation.isSuccess, loadUnsyncedCount]);
+  }, [lastSyncTime, loadLocationCounts]);
+
+  // Periodic refresh of counts every 30 seconds (to catch background sync updates)
+  React.useEffect(() => {
+    if (!isSatpam) return;
+
+    const interval = setInterval(() => {
+      loadLocationCounts();
+    }, 30000); // 30 seconds
+
+    return () => clearInterval(interval);
+  }, [isSatpam, loadLocationCounts]);
+
+  // Refresh counts when app comes to foreground
+  React.useEffect(() => {
+    const appStateRef = { current: AppState.currentState };
+
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active' &&
+        isSatpam
+      ) {
+        // App came to foreground, refresh counts and last sync time
+        loadLocationCounts();
+        refreshLastSyncTime();
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [isSatpam, loadLocationCounts, refreshLastSyncTime]);
 
   // Format cooldown time for display
   const formatCooldownTime = (ms: number) => {
@@ -179,6 +222,12 @@ export default function HomeScreen() {
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  // Format last sync time for display
+  const formatLastSyncTime = (date: Date | null) => {
+    if (!date) return 'Never';
+    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
   };
 
   // Get today's date in YYYY-MM-DD format
@@ -201,7 +250,7 @@ export default function HomeScreen() {
     setIsRefreshing(true);
     try {
       const refreshPromises: Promise<unknown>[] = [
-        loadUnsyncedCount(),
+        loadLocationCounts(),
         refetchStatus(),
         refreshCheckinStatus(),
         refetchAllocations(),
@@ -215,7 +264,7 @@ export default function HomeScreen() {
     }
     setIsRefreshing(false);
   }, [
-    loadUnsyncedCount,
+    loadLocationCounts,
     refetchStatus,
     refreshCheckinStatus,
     refetchAllocations,
@@ -261,12 +310,20 @@ export default function HomeScreen() {
     );
   };
 
-  // Handle sync
+  // Handle sync (manual)
   const handleSync = async () => {
-    if (!user?.uid) return;
+    if (!user?.uid || isSyncing) return;
     try {
-      const result = await syncMutation.mutateAsync(user.uid);
-      Alert.alert('Sync Complete', result.message);
+      const result = await syncNow();
+      if (result) {
+        Alert.alert(
+          'Sync Complete',
+          `Sent ${result.sent} records to server, deleted ${result.deleted} from storage`
+        );
+        await loadLocationCounts();
+      } else {
+        Alert.alert('Sync Skipped', 'No internet connection or no records to sync');
+      }
     } catch (error: any) {
       Alert.alert('Sync Failed', error.response?.data?.message || 'Failed to sync locations');
     }
@@ -573,19 +630,60 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Sync Button - Only show for SATPAM */}
+        {/* Sync Section - Only show for SATPAM */}
         {isSatpam && (
           <View className="mb-4">
+            {/* Sync stats row */}
+            <View className="mb-3 flex-row gap-3">
+              {/* Synced count card */}
+              <View className="flex-1 rounded-xl border border-green-200 bg-green-50 p-3">
+                <View className="flex-row items-center">
+                  <View className="h-8 w-8 items-center justify-center rounded-full bg-green-100">
+                    <Icon as={CheckCircleIcon} size={18} className="text-green-600" />
+                  </View>
+                  <View className="ml-2 flex-1">
+                    <Text className="text-lg font-bold text-green-700">{syncedCount}</Text>
+                    <Text className="text-xs text-green-600">Synced</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Pending count card */}
+              <View className="flex-1 rounded-xl border border-orange-200 bg-orange-50 p-3">
+                <View className="flex-row items-center">
+                  <View className="h-8 w-8 items-center justify-center rounded-full bg-orange-100">
+                    <Icon as={CloudUploadIcon} size={18} className="text-orange-600" />
+                  </View>
+                  <View className="ml-2 flex-1">
+                    <Text className="text-lg font-bold text-orange-700">{unsyncedCount}</Text>
+                    <Text className="text-xs text-orange-600">Pending</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+
+            {/* Auto-sync status */}
+            <View className="mb-2 flex-row items-center justify-between">
+              <View className="flex-row items-center">
+                <Icon as={RefreshCwIcon} size={14} className="text-gray-400" />
+                <Text className="ml-1 text-xs text-gray-500">Auto-sync every 5 mins</Text>
+              </View>
+              <Text className="text-xs text-gray-400">
+                Last sync: {formatLastSyncTime(lastSyncTime)}
+              </Text>
+            </View>
+
+            {/* Manual sync button */}
             <Pressable
               onPress={handleSync}
-              disabled={syncMutation.isPending || unsyncedCount === 0}
+              disabled={isSyncing || unsyncedCount === 0}
               className={cn(
                 'flex-row items-center justify-center rounded-xl border p-4',
                 unsyncedCount > 0
                   ? 'border-orange-200 bg-orange-50 active:bg-orange-100'
                   : 'border-gray-100 bg-gray-50'
               )}>
-              {syncMutation.isPending ? (
+              {isSyncing ? (
                 <ActivityIndicator color="#f97316" />
               ) : (
                 <>
